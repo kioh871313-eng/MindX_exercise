@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hardware Dashboard — Summary</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="../assets/css/style.css" />
+    <script src="https://code.highcharts.com/highcharts.js"></script>
+    <script src="https://code.highcharts.com/modules/treemap.js"></script>
+    <script src="https://code.highcharts.com/modules/heatmap.js"></script>
+</head>
+<body>
+
+<div id="loading-overlay" class="loading-overlay hidden"><div class="spinner"></div></div>
+
+<!-- HEADER -->
+<header class="app-header">
+    <div class="header-inner">
+        <div class="header-brand">
+            <div class="header-icon">&#128202;</div>
+            <div>
+                <h1 class="header-title">Hardware Sales Dashboard</h1>
+                <p class="header-subtitle">2019 – 2025 &middot; Real-time analytics</p>
+            </div>
+        </div>
+        <nav class="page-nav">
+            <a href="summary.html" class="nav-tab nav-tab--active">&#128200; Summary</a>
+            <a href="transactions.html" class="nav-tab">&#128196; Transactions</a>
+        </nav>
+    </div>
+</header>
+
+<main class="app-main">
+
+    <!-- FILTER PANEL -->
+    <section class="card filter-panel" aria-label="Filters">
+        <div class="filter-panel__header">
+            <span class="filter-panel__title">&#128269; Filters</span>
+            <button id="btn-reset" class="btn btn--ghost btn--sm">&#8635; Reset</button>
+        </div>
+        <div class="filter-grid">
+            <div class="filter-item">
+                <label class="filter-label" for="filter-category">Category</label>
+                <select id="filter-category" class="filter-select">
+                    <option value="">All Categories</option>
+                    <option value="cpu">CPU</option>
+                    <option value="gpu">GPU</option>
+                    <option value="ram">RAM</option>
+                    <option value="ssd">SSD</option>
+                    <option value="hdd">HDD</option>
+                    <option value="motherboard">Motherboard</option>
+                    <option value="monitor">Monitor</option>
+                    <option value="mouse">Mouse</option>
+                    <option value="keyboard">Keyboard</option>
+                    <option value="case">Case</option>
+                    <option value="fan">Fan</option>
+                    <option value="power supply">Power Supply</option>
+                    <option value="vga">VGA</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-brand">Brand</label>
+                <select id="filter-brand" class="filter-select">
+                    <option value="">All Brands</option>
+                    <option value="intel">Intel</option>
+                    <option value="amd">AMD</option>
+                    <option value="nvidia">NVIDIA</option>
+                    <option value="asus">Asus</option>
+                    <option value="msi">MSI</option>
+                    <option value="gigabyte">Gigabyte</option>
+                    <option value="corsair">Corsair</option>
+                    <option value="g.skill">G.Skill</option>
+                    <option value="logitech">Logitech</option>
+                    <option value="razer">Razer</option>
+                    <option value="samsung">Samsung</option>
+                    <option value="dell">Dell</option>
+                    <option value="hp">HP</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-region">Region</label>
+                <select id="filter-region" class="filter-select">
+                    <option value="">All Regions</option>
+                    <option value="north america">North America</option>
+                    <option value="europe">Europe</option>
+                    <option value="asia pacific">Asia Pacific</option>
+                    <option value="vietnam">Vietnam</option>
+                    <option value="southeast asia">Southeast Asia</option>
+                    <option value="middle east">Middle East</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-date-from">Date From</label>
+                <input type="date" id="filter-date-from" class="filter-input" />
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-date-to">Date To</label>
+                <input type="date" id="filter-date-to" class="filter-input" />
+            </div>
+            <div class="filter-item filter-item--checkbox">
+                <label class="filter-label">Include Refunds</label>
+                <label class="toggle">
+                    <input type="checkbox" id="filter-refund" checked />
+                    <span class="toggle__track"></span>
+                </label>
+            </div>
+        </div>
+    </section>
+
+    <!-- SUMMARY CARDS -->
+    <section class="summary-cards">
+        <div class="card stat-card">
+            <div class="stat-icon stat-icon--blue">&#36;</div>
+            <div class="stat-body">
+                <div class="stat-label">Total Revenue</div>
+                <div class="stat-value" id="stat-revenue">—</div>
+            </div>
+        </div>
+        <div class="card stat-card">
+            <div class="stat-icon stat-icon--green">&#128203;</div>
+            <div class="stat-body">
+                <div class="stat-label">Total Transactions</div>
+                <div class="stat-value" id="stat-transactions">—</div>
+            </div>
+        </div>
+        <div class="card stat-card">
+            <div class="stat-icon stat-icon--amber">&#128176;</div>
+            <div class="stat-body">
+                <div class="stat-label">Avg Order Value</div>
+                <div class="stat-value" id="stat-avg-order">—</div>
+            </div>
+        </div>
+        <div class="card stat-card">
+            <div class="stat-icon stat-icon--red">&#8634;</div>
+            <div class="stat-body">
+                <div class="stat-label">Refunds</div>
+                <div class="stat-value" id="stat-refunds">—</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ZONE 1: TOP PERFORMERS — Brand + Top Products kế nhau -->
+    <div class="chart-zone-label">Top Performers</div>
+    <section class="charts-grid charts-grid--2col">
+        <div class="card chart-box" id="brandChart"></div>
+        <div class="card chart-box" id="topProductsChart"></div>
+    </section>
+
+    <!-- ZONE 2: TREND — Monthly full width -->
+    <div class="chart-zone-label">Revenue Trend</div>
+    <section class="charts-grid charts-grid--1col">
+        <div class="card chart-box chart-box--tall" id="monthlyChart"></div>
+    </section>
+
+    <!-- ZONE 3: REVENUE BREAKDOWN — Category + Region + Segment -->
+    <div class="chart-zone-label">Revenue Breakdown</div>
+    <section class="charts-grid charts-grid--3col">
+        <div class="card chart-box" id="categoryChart"></div>
+        <div class="card chart-box" id="regionChart"></div>
+        <div class="card chart-box" id="segmentChart"></div>
+    </section>
+
+</main>
+
+<footer class="app-footer">
+    Hardware Sales Dashboard &middot; 2019–2025 &middot; Flask + Pandas + Highcharts
+</footer>
+
+<script src="../assets/js/api.js"></script>
+<script src="../assets/js/charts.js"></script>
+<script src="../assets/js/ui-shared.js"></script>
+<script src="../assets/js/summary.js"></script>
+
+</body>
+</html>

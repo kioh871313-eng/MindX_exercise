@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hardware Dashboard — Transactions</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="../assets/css/style.css" />
+</head>
+<body>
+
+<div id="loading-overlay" class="loading-overlay hidden"><div class="spinner"></div></div>
+
+<!-- TRANSACTION DETAIL MODAL -->
+<div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-box">
+        <div class="modal-header">
+            <h2 class="modal-title" id="modal-title">Transaction Detail</h2>
+            <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body" id="modal-body"></div>
+    </div>
+</div>
+
+<!-- HEADER -->
+<header class="app-header">
+    <div class="header-inner">
+        <div class="header-brand">
+            <div class="header-icon">&#128202;</div>
+            <div>
+                <h1 class="header-title">Hardware Sales Dashboard</h1>
+                <p class="header-subtitle">2019 – 2025 &middot; Real-time analytics</p>
+            </div>
+        </div>
+        <nav class="page-nav">
+            <a href="summary.html" class="nav-tab">&#128200; Summary</a>
+            <a href="transactions.html" class="nav-tab nav-tab--active">&#128196; Transactions</a>
+        </nav>
+    </div>
+</header>
+
+<main class="app-main">
+
+    <!-- FILTER PANEL (with search) -->
+    <section class="card filter-panel" aria-label="Filters">
+        <div class="filter-panel__header">
+            <span class="filter-panel__title">&#128269; Filters</span>
+            <button id="btn-reset" class="btn btn--ghost btn--sm">&#8635; Reset</button>
+        </div>
+        <div class="filter-grid">
+            <div class="filter-item">
+                <label class="filter-label" for="filter-category">Category</label>
+                <select id="filter-category" class="filter-select">
+                    <option value="">All Categories</option>
+                    <option value="cpu">CPU</option>
+                    <option value="gpu">GPU</option>
+                    <option value="ram">RAM</option>
+                    <option value="ssd">SSD</option>
+                    <option value="hdd">HDD</option>
+                    <option value="motherboard">Motherboard</option>
+                    <option value="monitor">Monitor</option>
+                    <option value="mouse">Mouse</option>
+                    <option value="keyboard">Keyboard</option>
+                    <option value="case">Case</option>
+                    <option value="fan">Fan</option>
+                    <option value="power supply">Power Supply</option>
+                    <option value="vga">VGA</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-brand">Brand</label>
+                <select id="filter-brand" class="filter-select">
+                    <option value="">All Brands</option>
+                    <option value="intel">Intel</option>
+                    <option value="amd">AMD</option>
+                    <option value="nvidia">NVIDIA</option>
+                    <option value="asus">Asus</option>
+                    <option value="msi">MSI</option>
+                    <option value="gigabyte">Gigabyte</option>
+                    <option value="corsair">Corsair</option>
+                    <option value="g.skill">G.Skill</option>
+                    <option value="logitech">Logitech</option>
+                    <option value="razer">Razer</option>
+                    <option value="samsung">Samsung</option>
+                    <option value="dell">Dell</option>
+                    <option value="hp">HP</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-region">Region</label>
+                <select id="filter-region" class="filter-select">
+                    <option value="">All Regions</option>
+                    <option value="north america">North America</option>
+                    <option value="europe">Europe</option>
+                    <option value="asia pacific">Asia Pacific</option>
+                    <option value="vietnam">Vietnam</option>
+                    <option value="southeast asia">Southeast Asia</option>
+                    <option value="middle east">Middle East</option>
+                </select>
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-date-from">Date From</label>
+                <input type="date" id="filter-date-from" class="filter-input" />
+            </div>
+            <div class="filter-item">
+                <label class="filter-label" for="filter-date-to">Date To</label>
+                <input type="date" id="filter-date-to" class="filter-input" />
+            </div>
+            <!-- Search — only on transactions page -->
+            <div class="filter-item filter-item--search">
+                <label class="filter-label" for="filter-search">Search</label>
+                <input type="text" id="filter-search" class="filter-input"
+                       placeholder="Product, brand, region…" autocomplete="off" />
+            </div>
+            <div class="filter-item filter-item--checkbox">
+                <label class="filter-label">Include Refunds</label>
+                <label class="toggle">
+                    <input type="checkbox" id="filter-refund" checked />
+                    <span class="toggle__track"></span>
+                </label>
+            </div>
+        </div>
+    </section>
+
+    <!-- TRANSACTION TABLE -->
+    <section class="card table-section">
+        <div class="table-header">
+            <h2 class="table-title">&#128196; Transaction Records</h2>
+            <span class="pagination-info" id="pagination-info">—</span>
+        </div>
+        <div class="table-wrapper">
+            <table class="data-table" role="grid">
+                <thead>
+                    <tr>
+                        <th scope="col">ID</th>
+                        <th scope="col">Date</th>
+                        <th scope="col">Category</th>
+                        <th scope="col">Brand</th>
+                        <th scope="col">Product</th>
+                        <th scope="col" class="num">Unit Price</th>
+                        <th scope="col" class="num">Qty</th>
+                        <th scope="col" class="num">Total</th>
+                        <th scope="col">Region</th>
+                        <th scope="col">Payment</th>
+                        <th scope="col">Refund</th>
+                    </tr>
+                </thead>
+                <tbody id="data-table-body">
+                    <tr><td colspan="11" class="empty-row">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="pagination">
+            <button id="btn-prev" class="btn btn--ghost btn--sm" disabled>&#8592; Prev</button>
+            <span class="pagination-info" id="pagination-info-bottom">—</span>
+            <button id="btn-next" class="btn btn--ghost btn--sm">Next &#8594;</button>
+        </div>
+    </section>
+
+</main>
+
+<footer class="app-footer">
+    Hardware Sales Dashboard &middot; 2019–2025 &middot; Flask + Pandas + Highcharts
+</footer>
+
+<script src="../assets/js/api.js"></script>
+<script src="../assets/js/ui-shared.js"></script>
+<script src="../assets/js/transactions.js"></script>
+
+</body>
+</html>

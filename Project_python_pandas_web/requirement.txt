@@ -1,0 +1,7 @@
+# ── Web framework ──────────────────────────────────────────────────────────
+flask==3.1.1          # REST API server
+flask-cors==5.0.1     # Cross-Origin Resource Sharing (browser → API)
+
+# ── Data processing ─────────────────────────────────────────────────────────
+pandas==2.2.3         # DataFrame: ETL, groupby, filtering
+numpy==2.2.6          # Numeric ops (pandas dependency)
