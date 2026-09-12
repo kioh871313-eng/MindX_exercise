@@ -81,7 +81,11 @@ api/app.py  (Flask application startup)
       ├── Attach _SafeJSONProvider  → serialise float NaN as null
       ├── CORS(app)                 → allow requests from file:// origins
       ├── Register metrics_bp       → prefix /metrics
-      └── Register filters_bp       → prefix /filter
+      ├── Register filters_bp       → prefix /filter
+      └── Serve web_client/ as static files
+              ├── GET /              → summary.html
+              ├── GET /transactions  → transactions.html
+              └── GET /assets/<path> → CSS, JS files
 ```
 
 ### How each Blueprint works
@@ -150,6 +154,24 @@ transactions.js → Initialises transactions.html: table render, modal, paginati
 <script src="../assets/js/ui-shared.js"></script>
 <script src="../assets/js/transactions.js"></script>
 ```
+
+### API base URL detection
+
+`api.js` does not hardcode a base URL. It detects the runtime environment automatically:
+
+```javascript
+const BASE_URL = window.location.protocol === "file:"
+    ? "http://127.0.0.1:5000"   // opened directly as a local file
+    : window.location.origin;   // served by Flask (local or via ngrok)
+```
+
+This means the same HTML/JS files work in all three modes without any changes:
+
+| Mode | How to open | BASE_URL resolves to |
+|---|---|---|
+| Local file | Double-click HTML | `http://127.0.0.1:5000` |
+| Local Flask | `http://127.0.0.1:5000/` | `http://127.0.0.1:5000` |
+| ngrok | `https://abc123.ngrok-free.app/` | `https://abc123.ngrok-free.app` |
 
 ### Flow — user opens Summary page
 
@@ -278,6 +300,44 @@ charts.js
 
 ---
 
+## ngrok Deployment Flow
+
+When sharing the dashboard via ngrok, the request flow changes as follows:
+
+```
+Remote user's browser
+      │
+      │  HTTPS request to https://abc123.ngrok-free.app/
+      ▼
+ngrok cloud (public endpoint)
+      │
+      │  Tunnels to local machine port 5000
+      ▼
+Flask app.py (running on 127.0.0.1:5000)
+      │
+      ├── GET /              → serves summary.html
+      ├── GET /transactions  → serves transactions.html
+      ├── GET /assets/...    → serves CSS / JS files
+      │
+      └── GET /metrics/*     → pandas query → JSON response
+          GET /filter/*      → pandas query → JSON response
+      │
+      │  JSON responses tunnel back through ngrok
+      ▼
+Remote user's browser renders charts and table
+```
+
+**Key point:** Because Flask serves both the HTML pages and the API from the same
+origin, `window.location.origin` in `api.js` correctly resolves to the ngrok URL.
+No CORS issues, no hardcoded addresses to update.
+
+```
+Local file mode:    window.location.protocol === "file:"  →  http://127.0.0.1:5000
+Flask / ngrok mode: window.location.origin               →  https://abc123.ngrok-free.app
+```
+
+---
+
 ## End-to-End Data Flow (CSV → Chart)
 
 ```
@@ -314,3 +374,5 @@ Chart render / Table rows in the browser
 | Default date range should reflect actual dataset, not today's system date | `GET /metrics/date-range` returns the true max date from the dataset; JS uses that value instead of `new Date()` |
 | Search should not fire an API call on every keystroke | 400 ms debounce in `ui-shared.js` |
 | Transaction detail modal needs no extra API call | Row data is already in memory from the table fetch; `openModal(row)` simply renders it |
+| Sharing with ngrok requires no code changes | `api.js` auto-detects the environment: `file://` → localhost fallback, otherwise `window.location.origin` which equals the ngrok URL |
+| Nav links differ between file:// and Flask modes | Both HTML files include an inline script that rewrites `href` values to `/` and `/transactions` when not in `file://` mode |

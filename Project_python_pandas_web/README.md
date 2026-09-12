@@ -130,13 +130,55 @@ python etl/clean_data.py
 cd api
 python app.py
 ```
-API available at `http://127.0.0.1:5000`
 
-### 5. Open dashboard
-Open `web_client/components/summary.html` or `web_client/components/transactions.html`
-in your browser. No web server needed.
+Flask serves both the API and the dashboard at `http://127.0.0.1:5000`:
+
+| URL | Page |
+|---|---|
+| `http://127.0.0.1:5000/` | Summary page |
+| `http://127.0.0.1:5000/transactions` | Transactions page |
+| `http://127.0.0.1:5000/metrics/summary` | API example |
 
 > After re-running the ETL, restart the Flask process to reload the clean CSV.
+
+---
+
+## Sharing with ngrok
+
+ngrok creates a public HTTPS tunnel to your local Flask server, allowing others to
+view the dashboard without any deployment.
+
+### 1. Install ngrok
+Download from [ngrok.com/download](https://ngrok.com/download), then register your
+auth token (one-time setup):
+```bash
+ngrok config add-authtoken <your_token>
+```
+
+### 2. Start Flask (if not already running)
+```bash
+cd api
+python app.py
+```
+
+### 3. Open a second terminal and start the tunnel
+```bash
+ngrok http 5000
+```
+
+ngrok will print a public URL:
+```
+Forwarding  https://abc123.ngrok-free.app → http://localhost:5000
+```
+
+### 4. Share the links
+| Link | Page |
+|---|---|
+| `https://abc123.ngrok-free.app/` | Summary |
+| `https://abc123.ngrok-free.app/transactions` | Transactions |
+
+The dashboard auto-detects whether it is running under ngrok or opened locally as a
+file, and adjusts the API base URL accordingly — no manual configuration needed.
 
 ---
 

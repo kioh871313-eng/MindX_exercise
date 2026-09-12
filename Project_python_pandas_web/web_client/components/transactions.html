@@ -36,8 +36,8 @@
             </div>
         </div>
         <nav class="page-nav">
-            <a href="summary.html" class="nav-tab">&#128200; Summary</a>
-            <a href="transactions.html" class="nav-tab nav-tab--active">&#128196; Transactions</a>
+            <a href="summary.html" class="nav-tab" id="nav-summary">&#128200; Summary</a>
+            <a href="transactions.html" class="nav-tab nav-tab--active" id="nav-transactions">&#128196; Transactions</a>
         </nav>
     </div>
 </header>
@@ -169,6 +169,19 @@
 <script src="../assets/js/api.js"></script>
 <script src="../assets/js/ui-shared.js"></script>
 <script src="../assets/js/transactions.js"></script>
+<!-- Fix nav links when served via Flask -->
+<script>
+    (function () {
+        const isFlask = window.location.protocol !== "file:";
+        if (isFlask) {
+            document.getElementById("nav-summary").href      = "/";
+            document.getElementById("nav-transactions").href = "/transactions";
+            document.querySelectorAll("link[rel=stylesheet]").forEach(l => {
+                l.href = l.href.replace(/.*\/assets\//, "/assets/");
+            });
+        }
+    })();
+</script>
 
 </body>
 </html>

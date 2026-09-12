@@ -3,7 +3,12 @@
  * All functions return parsed JSON or throw on network/HTTP error.
  */
 
-const BASE_URL = "http://127.0.0.1:5000";
+// Auto-detect API base URL:
+// - When served by Flask (local or via ngrok): same origin, no port suffix needed
+// - When opened directly as file (file://): fall back to localhost:5000
+const BASE_URL = window.location.protocol === "file:"
+    ? "http://127.0.0.1:5000"
+    : window.location.origin;
 
 // ---------------------------------------------------------------------------
 // Internal helper
