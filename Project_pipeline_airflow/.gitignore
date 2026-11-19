@@ -1,0 +1,36 @@
+# Environment — contains AIRFLOW_UID only, still git-ignored by convention
+.env
+
+# Local dev database — contains DWH credentials, never commit
+docker-compose.dev-db.yaml
+
+# Certificates / keys
+*.pem
+*.key
+
+# Airflow runtime
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.airflow/
+
+# Python
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Data files
+data/
+*.csv
+*.parquet
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

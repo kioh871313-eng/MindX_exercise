@@ -1,0 +1,130 @@
+version: '3.8'
+
+# =================================================================
+# docker-compose.yaml — Airflow only
+#
+# This file contains NO database credentials and NO sensitive data.
+# It is safe to commit to git.
+#
+# The Data Warehouse (postgres-dwh) is intentionally NOT here.
+# It is managed separately via docker-compose.dev-db.yaml (local dev)
+# or a managed database service (UAT/PROD).
+#
+# Before running: copy .env.example → .env and set AIRFLOW_UID.
+# After running : add connections via Airflow UI (Admin → Connections).
+# =================================================================
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.1
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    PYTHONPATH: /opt/airflow/dags
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./sqls:/opt/airflow/sqls
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres-airflow:
+      condition: service_healthy
+
+services:
+  # -------------------------------------------------------
+  # PostgreSQL — Airflow metadata DB only
+  # This database stores Airflow's internal state (DAG runs,
+  # task instances, connections, variables). It is NOT the
+  # data warehouse — do not use it for pipeline data.
+  # -------------------------------------------------------
+  postgres-airflow:
+    image: postgres:15
+    container_name: postgres_airflow_meta
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # -------------------------------------------------------
+  # Airflow — DB init
+  # -------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db upgrade
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+    restart: on-failure
+    depends_on:
+      <<: *airflow-common-depends-on
+
+  # -------------------------------------------------------
+  # Airflow — Webserver
+  # -------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # -------------------------------------------------------
+  # Airflow — Scheduler
+  # -------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_airflow_data:
