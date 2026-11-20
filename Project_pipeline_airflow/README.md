@@ -327,14 +327,44 @@ the next hourly trigger fires, Airflow skips that trigger.
 | Task | What happens |
 |------|--------------|
 | `capture_checkpoint` | Records the pipeline **start** timestamp in XCom. Used as the new CDC checkpoint if the full pipeline succeeds. |
-| `extract_load_bronze` | Lists S3 files with `LastModified > pipeline_last_run_ts`. Reads each CSV, upserts into `bronze.raw_hardware_sales` via `ON CONFLICT (order_id, _source_file) DO UPDATE`. |
+| `extract_load_bronze` | **ShortCircuitOperator.** Checks S3 for files with `LastModified > pipeline_last_run_ts`. If none found, returns `False` → all downstream tasks are **skipped** (not failed), pipeline marked success. If files found, upserts into `bronze.raw_hardware_sales` and returns `True`. Supports `force_reprocess` mode — see below. |
 | `validate_bronze` | Checks table is non-empty, required columns present, NULL rate < 50% on `order_id`. Warns on soft issues, raises on hard blockers only. |
 | `transform_silver` | Calls `sqls/silver/transform_bronze_to_silver.sql` with CDC cursor `silver_last_bronze_id`. All cleaning logic (date parsing, type casting, normalisation, measure recalculation) is in the SQL file. |
-| `validate_silver` | 13 SQL checks. Raises on any failure. See [Data Quality & Validation](#data-quality--validation). |
+| `validate_silver` | 13 SQL checks. See [Data Quality & Validation](#data-quality--validation). |
 | `build_dim_*` | 4 dimension tasks run in parallel. Each calls the corresponding `sqls/gold/transform_silver_to_dim_*.sql`. |
 | `build_fact_sales` | Calls `sqls/gold/transform_silver_to_fact_sales.sql` after all dims complete. Resolves all 5 surrogate keys via SQL JOINs. |
-| `validate_gold` | 15 SQL checks across dims and fact. Raises on any failure. |
+| `validate_gold` | 15 SQL checks across dims and fact. |
 | `update_cdc_checkpoint` | Persists the start timestamp (from XCom) as `pipeline_last_run_ts`. Only runs if **all** upstream tasks succeeded — guarantees the checkpoint is never advanced on a failed run. |
+
+### Trigger modes
+
+#### Automatic (hourly schedule)
+
+The pipeline uses `ShortCircuitOperator` for the `extract_load_bronze` task:
+
+```
+S3 has new/updated files?
+    YES → load to bronze, run full pipeline
+    NO  → short-circuit: all downstream tasks SKIPPED, pipeline marked success
+```
+
+Skipped tasks are **not failures** — the DAG run is green. This saves resource on
+every hourly run where the source file hasn't changed.
+
+#### Manual trigger (Trigger DAG ▶ button)
+
+Just click **Trigger DAG ▶** in the Airflow UI — no JSON config needed.
+
+The pipeline detects that it was triggered manually (`run_type = "manual"`) and
+skips the S3 check entirely, running Silver → Gold with all existing Bronze data.
+
+**When to use:** after updating any SQL transform file (e.g. fixing a cleaning rule
+in `transform_bronze_to_silver.sql`) to reprocess existing data with the new logic.
+
+| Run type | S3 has new files | No new files |
+|---|---|---|
+| **Scheduled (hourly)** | Load bronze → full pipeline | All downstream **SKIPPED** |
+| **Manual (Trigger DAG ▶)** | Load bronze → full pipeline | Skip S3 load → Silver + Gold run anyway |
 
 ---
 
@@ -479,9 +509,18 @@ The `update_cdc_checkpoint` task is the last task in the DAG. If any upstream
 task fails, this task is skipped — the checkpoint stays at its previous value
 and the next run re-processes the same files from scratch.
 
+**Short-circuit when no new data.**
+When `extract_load_bronze` finds no new S3 files, it returns `False` via
+`ShortCircuitOperator`. All downstream tasks are skipped — the checkpoint is
+not advanced and no resource is wasted.
+
+**Force reprocess mode.**
+Trigger the DAG manually with `{"force_reprocess": true}` to bypass the S3 check
+and re-run Silver + Gold with existing Bronze data. Useful after updating SQL logic.
+
 | Layer | Idempotency mechanism | CDC mechanism |
 |-------|-----------------------|---------------|
-| Bronze | `ON CONFLICT (order_id, _source_file) DO UPDATE` — re-loading the same file updates existing rows | S3 `LastModified > pipeline_last_run_ts` (timestamp) |
+| Bronze | `ON CONFLICT (order_id, _source_file) DO UPDATE` — re-loading the same file updates existing rows | S3 `LastModified > pipeline_last_run_ts` (timestamp); short-circuits if nothing new |
 | Silver | `ON CONFLICT (order_id) DO UPDATE` | `WHERE id > silver_last_bronze_id` |
 | Gold dims | `ON CONFLICT DO UPDATE` (Type 1) or SCD2 `UPDATE+INSERT` | Full silver table scan |
 | Gold fact | `ON CONFLICT (order_id) DO UPDATE` | Full silver table scan |

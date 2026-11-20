@@ -64,7 +64,7 @@ from typing import List, Optional, Tuple
 import pandas as pd
 from airflow import DAG
 from airflow.models import Variable
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from airflow.operators.empty import EmptyOperator
 
 from scripts.s3_helpers import (
@@ -311,12 +311,28 @@ def capture_checkpoint(**context) -> str:
 
 
 # =============================================================================
-# TASK 2 — Extract S3 → Bronze
+# TASK 2 — Extract S3 → Bronze  (ShortCircuitOperator)
 # =============================================================================
-def extract_load_bronze(**context) -> int:
+def extract_load_bronze(**context) -> bool:
     """
     Read new/updated S3 files and upsert into bronze.raw_hardware_sales.
 
+    Returns True  → downstream tasks run normally.
+    Returns False → all downstream tasks are SKIPPED (not failed).
+
+    Behaviour by run type:
+    ─────────────────────────────────────────────────────────────
+    Scheduled run (hourly):
+      - Checks S3 for files with LastModified > pipeline_last_run_ts
+      - New files found  → load to bronze, return True (run full pipeline)
+      - No new files     → return False (skip all downstream, save resource)
+
+    Manual run (Trigger DAG button in UI):
+      - Always returns True regardless of S3 state
+      - Skips S3 load (no new data to load) but runs Silver + Gold
+      - Use this after changing SQL transform logic to reprocess
+        existing Bronze data with the updated logic
+    ─────────────────────────────────────────────────────────────
     CDC  : only files with LastModified > pipeline_last_run_ts processed.
     Idempotent: ON CONFLICT (order_id, _source_file) DO UPDATE.
     """
@@ -324,6 +340,22 @@ def extract_load_bronze(**context) -> int:
     task_id = context["task"].task_id
     run_id  = context["run_id"]
 
+    # Distinguish scheduled vs manual trigger
+    run_type = context["dag_run"].run_type  # "scheduled" | "manual" | "backfill"
+    is_manual = run_type != "scheduled"
+
+    if is_manual:
+        logger.info(
+            "Manual trigger detected (run_type='%s') — skipping S3 check. "
+            "Pipeline will run Silver and Gold with existing Bronze data.",
+            run_type,
+        )
+        write_log(dag_id, task_id, run_id, "bronze", "success",
+                  rows_processed=0,
+                  error_message="manual trigger: skipped S3 load, reprocessing existing bronze")
+        return True  # always proceed downstream on manual run
+
+    # Scheduled run — check S3 for new files
     write_log(dag_id, task_id, run_id, "bronze", "started")
 
     s3_bucket   = Variable.get(S3_BUCKET_VAR)
@@ -336,9 +368,12 @@ def extract_load_bronze(**context) -> int:
     )
 
     if not new_files:
-        logger.info("No new/updated files since %s — skipping bronze load.", last_run_ts)
-        write_log(dag_id, task_id, run_id, "bronze", "success", rows_processed=0)
-        return 0
+        logger.info(
+            "Scheduled run: no new/updated files since %s — short-circuiting. "
+            "All downstream tasks will be skipped.",
+            last_run_ts,
+        )
+        return False  # ShortCircuit: skip all downstream tasks
 
     hook       = get_pg_hook("postgres_dwh")
     total_rows = 0
@@ -354,7 +389,7 @@ def extract_load_bronze(**context) -> int:
 
     write_log(dag_id, task_id, run_id, "bronze", "success", rows_processed=total_rows)
     logger.info("Bronze load complete. Total rows upserted: %d", total_rows)
-    return total_rows
+    return True
 
 
 def _upsert_bronze(hook, df: pd.DataFrame) -> None:
@@ -884,7 +919,20 @@ with DAG(
 End-to-end ETL: **S3 → Bronze → Silver → Gold (star schema)**.
 
 ### Schedule
-Every hour. Exits early if no new/updated S3 files found.
+Every hour.
+
+### Trigger modes
+
+| Run type | S3 has new files | No new files |
+|---|---|---|
+| **Scheduled (hourly)** | Load bronze, run full pipeline | Short-circuit: all downstream SKIPPED |
+| **Manual (Trigger DAG button)** | Load bronze, run full pipeline | Skip S3 load, run Silver + Gold anyway |
+
+**When to trigger manually:**
+After updating SQL transform logic (e.g. fixing a cleaning rule in
+`transform_bronze_to_silver.sql`), trigger manually to reprocess all
+existing Bronze data through Silver and Gold with the new logic.
+No JSON config needed — just click **Trigger DAG ▶**.
 
 ### CDC
 `pipeline_last_run_ts` (ISO-8601 UTC). Captured at run START.
@@ -912,9 +960,10 @@ Recipient in `ALERT_EMAIL` env var.
         task_id="capture_checkpoint",
         python_callable=capture_checkpoint,
     )
-    t_bronze = PythonOperator(
+    t_bronze = ShortCircuitOperator(
         task_id="extract_load_bronze",
         python_callable=extract_load_bronze,
+        ignore_downstream_trigger_rules=True,  # skip ALL downstream, not just direct children
     )
     t_validate_bronze = PythonOperator(
         task_id="validate_bronze",
