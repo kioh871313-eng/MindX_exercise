@@ -50,12 +50,7 @@ CREATE TABLE IF NOT EXISTS bronze.raw_hardware_sales (
 
     -- Metadata
     _source_file        TEXT            NOT NULL,
-    _ingested_at        TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-
-    -- Idempotency: same order_id from the same file is upserted,
-    -- not duplicated. Supports repeated loads from the same S3 file.
-    CONSTRAINT uq_bronze_order_file
-        UNIQUE (order_id, _source_file)
+    _ingested_at        TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_bronze_ingested_at
@@ -64,7 +59,10 @@ CREATE INDEX IF NOT EXISTS idx_bronze_ingested_at
 CREATE INDEX IF NOT EXISTS idx_bronze_order_id
     ON bronze.raw_hardware_sales (order_id);
 
+CREATE INDEX IF NOT EXISTS idx_bronze_source_ingested
+    ON bronze.raw_hardware_sales (_source_file, _ingested_at DESC);
+
 COMMENT ON TABLE bronze.raw_hardware_sales IS
     'Raw Computer Hardware Sales data loaded from Amazon S3. '
     'No transformations applied. '
-    'Supports repeated loads from the same file via upsert on (order_id, _source_file).';
+    'All rows appended as a snapshot; _source_file + _ingested_at track load history.';

@@ -8,9 +8,10 @@
 -- Idempotency: INSERT … ON CONFLICT (order_id) DO UPDATE
 --   Safe to re-run any number of times per day.
 --
--- Called by: dag_silver_transform.py via execute_sql_file()
--- Parameters passed at runtime (Python substitutes before execution):
---   :last_bronze_id  — only process rows with bronze.id > this value
+-- Called by: dag_pipeline.py via execute_sql_file()
+-- Snapshot model: processes only the latest snapshot per source
+--   file (_ingested_at = MAX per _source_file). No runtime
+--   parameters required.
 -- =============================================================
 
 INSERT INTO silver.clean_hardware_sales (
@@ -208,8 +209,12 @@ SELECT
 FROM bronze.raw_hardware_sales
 
 WHERE
-    -- CDC incremental filter — only unprocessed bronze rows
-    id > %(last_bronze_id)s
+    -- CDC incremental filter — only rows from the most recent load of this file
+    _ingested_at = (
+        SELECT MAX(b2._ingested_at)
+        FROM bronze.raw_hardware_sales b2
+        WHERE b2._source_file = bronze.raw_hardware_sales._source_file
+    )
     -- Skip rows with NULL key columns (they cannot be merged downstream)
     AND TRIM(COALESCE(order_id,   '')) <> ''
     AND TRIM(COALESCE(customer_id,'')) <> ''

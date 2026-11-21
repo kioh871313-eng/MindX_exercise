@@ -13,16 +13,17 @@ Flow
 ----
 capture_checkpoint
     └── extract_load_bronze
-            └── validate_bronze
-                    └── transform_silver
-                            └── validate_silver
-                                    ├── build_dim_date     ┐
-                                    ├── build_dim_geography│ parallel
-                                    ├── build_dim_product  │
-                                    └── build_dim_customer ┘
-                                            └── build_fact_sales
-                                                    └── validate_gold
-                                                            └── update_cdc_checkpoint
+            └── cleanup_bronze_snapshots
+                    └── validate_bronze
+                            └── transform_silver
+                                    └── validate_silver
+                                            ├── build_dim_date     ┐
+                                            ├── build_dim_geography│ parallel
+                                            ├── build_dim_product  │
+                                            └── build_dim_customer ┘
+                                                    └── build_fact_sales
+                                                            └── validate_gold
+                                                                    └── update_cdc_checkpoint
 
 CDC strategy
 ------------
@@ -33,8 +34,9 @@ Supports: multiple runs per day, same file overwritten, on-demand triggers.
 
 Bronze idempotency
 ------------------
-ON CONFLICT (order_id, _source_file) DO UPDATE
-  → Re-loading the same file updates existing rows, inserts new ones.
+Snapshot model: every load appends a new batch (no ON CONFLICT).
+cleanup_bronze_snapshots removes old batches after each load,
+keeping only the latest snapshot per _source_file.
 
 Email alerts
 ------------
@@ -92,7 +94,6 @@ DAG_ID        = "hardware_sales_pipeline"
 CDC_VAR       = "pipeline_last_run_ts"
 S3_BUCKET_VAR = "s3_bucket_name"
 S3_PREFIX_VAR = "s3_prefix"
-SILVER_ID_VAR = "silver_last_bronze_id"
 BRONZE_SCHEMA = "bronze"
 BRONZE_TABLE  = "raw_hardware_sales"
 
@@ -103,14 +104,6 @@ ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "")
 # Check result type: (check_name, message, value)
 # ---------------------------------------------------------------------------
 CheckResult = Tuple[str, str, object]
-
-default_args = {
-    "owner": "data_engineering",
-    "retries": 1,
-    "retry_delay": timedelta(seconds=30),
-    "email_on_failure": False,   # _send_validation_email handles all alerts
-    "email_on_retry": False,
-}
 
 
 # =============================================================================
@@ -256,6 +249,93 @@ def _send_validation_email(
 
 
 # =============================================================================
+# TASK FAILURE CALLBACK — fires on any task exception
+# =============================================================================
+
+def _task_failure_callback(context) -> None:
+    """
+    on_failure_callback fired by Airflow when any task raises an exception.
+    Sends a simple error email via the same SMTP mechanism as validation emails.
+    Skips silently if ALERT_EMAIL or smtp_default is not configured.
+    """
+    if not ALERT_EMAIL:
+        return
+
+    task_id   = context["task"].task_id
+    run_id    = context["run_id"]
+    exception = context.get("exception")
+    error_msg = str(exception) if exception else "No exception details available."
+
+    try:
+        from airflow.hooks.base import BaseHook
+        conn          = BaseHook.get_connection("smtp_default")
+        smtp_host     = conn.host or ""
+        smtp_user     = conn.login or ""
+        smtp_password = conn.password or ""
+        smtp_port     = int(conn.port) if conn.port else 587
+    except Exception:
+        logger.warning("smtp_default not found — skipping failure email for task '%s'.", task_id)
+        return
+
+    if not smtp_host or not smtp_user:
+        return
+
+    subject = "[ERROR] {} — task '{}' failed".format(DAG_ID, task_id)
+
+    sep   = "─" * 60
+    lines = [
+        "DAG     : {}".format(DAG_ID),
+        "Task    : {}".format(task_id),
+        "Run ID  : {}".format(run_id),
+        "Status  : FAILED",
+        "",
+        sep,
+        "ERROR",
+        sep,
+        error_msg,
+        "",
+        sep,
+        "INVESTIGATE",
+        sep,
+        "Query pipeline log:",
+        "  SELECT dag_id, task_id, layer, status, error_message, logged_at",
+        "  FROM logs.pipeline_log",
+        "  WHERE run_id = '{}'".format(run_id),
+        "  ORDER BY logged_at;",
+    ]
+    body = "\n".join(lines)
+
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        mime_msg            = MIMEText("<pre style='font-family:monospace'>{}</pre>".format(body), "html")
+        mime_msg["Subject"] = subject
+        mime_msg["From"]    = smtp_user
+        mime_msg["To"]      = ALERT_EMAIL
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, [ALERT_EMAIL], mime_msg.as_string())
+        logger.info("Failure email sent → %s | %s", ALERT_EMAIL, subject)
+    except Exception as exc:
+        logger.error("Failed to send failure email for task '%s': %s", task_id, exc)
+
+
+# =============================================================================
+# DAG DEFAULT ARGS  (defined here — after callbacks are declared)
+# =============================================================================
+
+default_args = {
+    "owner": "data_engineering",
+    "retries": 1,
+    "retry_delay": timedelta(seconds=30),
+    "email_on_failure": False,   # _task_failure_callback handles all alerts
+    "email_on_retry": False,
+    "on_failure_callback": _task_failure_callback,
+}
+
+
+# =============================================================================
 # HELPER: run a list of checks, return (hard_errors, warn_items, passed_names)
 # =============================================================================
 
@@ -315,7 +395,7 @@ def capture_checkpoint(**context) -> str:
 # =============================================================================
 def extract_load_bronze(**context) -> bool:
     """
-    Read new/updated S3 files and upsert into bronze.raw_hardware_sales.
+    Read new/updated S3 files and insert into bronze.raw_hardware_sales as a snapshot.
 
     Returns True  → downstream tasks run normally.
     Returns False → all downstream tasks are SKIPPED (not failed).
@@ -324,17 +404,19 @@ def extract_load_bronze(**context) -> bool:
     ─────────────────────────────────────────────────────────────
     Scheduled run (hourly):
       - Checks S3 for files with LastModified > pipeline_last_run_ts
-      - New files found  → load to bronze, return True (run full pipeline)
-      - No new files     → return False (skip all downstream, save resource)
+      - New/updated files found → insert all rows from those files as a
+        new snapshot batch, return True (run full pipeline)
+      - No new files → return False (skip all downstream, save resource)
 
     Manual run (Trigger DAG button in UI):
-      - Always returns True regardless of S3 state
-      - Skips S3 load (no new data to load) but runs Silver + Gold
-      - Use this after changing SQL transform logic to reprocess
-        existing Bronze data with the updated logic
+      - Bypasses CDC timestamp check entirely
+      - Loads ALL files from S3 as a fresh snapshot batch
+      - Always returns True (runs full pipeline)
+      - Use this after changing SQL transform logic to reprocess all data
     ─────────────────────────────────────────────────────────────
-    CDC  : only files with LastModified > pipeline_last_run_ts processed.
-    Idempotent: ON CONFLICT (order_id, _source_file) DO UPDATE.
+    Bronze = source data verbatim (no dedup, no filtering).
+    Each file's rows are identical to the S3 source.
+    cleanup_bronze_snapshots removes batches older than 7 days.
     """
     dag_id  = context["dag"].dag_id
     task_id = context["task"].task_id
@@ -346,13 +428,36 @@ def extract_load_bronze(**context) -> bool:
 
     if is_manual:
         logger.info(
-            "Manual trigger detected (run_type='%s') — skipping S3 check. "
-            "Pipeline will run Silver and Gold with existing Bronze data.",
+            "Manual trigger detected (run_type='%s') — loading all S3 files "
+            "(CDC timestamp check bypassed).",
             run_type,
         )
-        write_log(dag_id, task_id, run_id, "bronze", "success",
-                  rows_processed=0,
-                  error_message="manual trigger: skipped S3 load, reprocessing existing bronze")
+        s3_bucket = Variable.get(S3_BUCKET_VAR)
+        s3_prefix = Variable.get(S3_PREFIX_VAR, default_var="computer_hardware_sales/")
+
+        from scripts.s3_helpers import list_s3_files
+        all_files = list_s3_files(bucket=s3_bucket, prefix=s3_prefix, aws_conn_id="aws_default")
+
+        if not all_files:
+            logger.info("Manual trigger: no files found in S3 — skipping bronze load.")
+            write_log(dag_id, task_id, run_id, "bronze", "success",
+                      rows_processed=0,
+                      error_message="manual trigger: no S3 files found")
+            return True
+
+        hook       = get_pg_hook("postgres_dwh")
+        total_rows = 0
+        for s3_key in all_files:
+            logger.info("Manual load file: %s", s3_key)
+            df = read_csv_from_s3(bucket=s3_bucket, key=s3_key, aws_conn_id="aws_default")
+            df["_source_file"] = s3_key
+            df["_ingested_at"] = datetime.utcnow()
+            _insert_bronze(hook, df)
+            total_rows += len(df)
+            logger.info("Inserted %d rows from %s", len(df), s3_key)
+
+        write_log(dag_id, task_id, run_id, "bronze", "success", rows_processed=total_rows)
+        logger.info("Manual bronze load complete. Total rows inserted: %d", total_rows)
         return True  # always proceed downstream on manual run
 
     # Scheduled run — check S3 for new files
@@ -383,20 +488,21 @@ def extract_load_bronze(**context) -> bool:
         df = read_csv_from_s3(bucket=s3_bucket, key=s3_key, aws_conn_id="aws_default")
         df["_source_file"] = s3_key
         df["_ingested_at"] = datetime.utcnow()
-        _upsert_bronze(hook, df)
+        _insert_bronze(hook, df)
         total_rows += len(df)
-        logger.info("Upserted %d rows from %s", len(df), s3_key)
+        logger.info("Inserted %d rows from %s", len(df), s3_key)
 
     write_log(dag_id, task_id, run_id, "bronze", "success", rows_processed=total_rows)
-    logger.info("Bronze load complete. Total rows upserted: %d", total_rows)
+    logger.info("Bronze load complete. Total rows inserted: %d", total_rows)
     return True
 
 
-def _upsert_bronze(hook, df: pd.DataFrame) -> None:
+def _insert_bronze(hook, df: pd.DataFrame) -> None:
     """
-    Upsert rows into bronze.raw_hardware_sales.
+    Insert rows into bronze.raw_hardware_sales (snapshot model).
     Only schema-defined columns are inserted — extra CSV columns are dropped.
-    ON CONFLICT (order_id, _source_file) DO UPDATE.
+    No ON CONFLICT — every load creates a new snapshot batch identified by
+    (_source_file, _ingested_at).
     """
     BRONZE_COLUMNS = [
         "order_id", "order_date", "ship_date", "ship_mode",
@@ -414,19 +520,13 @@ def _upsert_bronze(hook, df: pd.DataFrame) -> None:
 
     col_names    = ", ".join(['"{}"'.format(c) for c in cols])
     placeholders = ", ".join(["%s"] * len(cols))
-    update_set   = ", ".join(
-        ['"{c}" = EXCLUDED."{c}"'.format(c=c)
-         for c in cols if c not in ("order_id", "_source_file")]
-    )
 
     sql = """
         INSERT INTO {schema}.{table} ({cols})
-        VALUES ({placeholders})
-        ON CONFLICT (order_id, _source_file)
-        DO UPDATE SET {update_set};
+        VALUES ({placeholders});
     """.format(
         schema=BRONZE_SCHEMA, table=BRONZE_TABLE,
-        cols=col_names, placeholders=placeholders, update_set=update_set,
+        cols=col_names, placeholders=placeholders,
     )
 
     rows = [tuple(row) for row in df_insert.itertuples(index=False, name=None)]
@@ -440,6 +540,47 @@ def _upsert_bronze(hook, df: pd.DataFrame) -> None:
         raise
     finally:
         conn.close()
+
+
+# =============================================================================
+# TASK 2b — Cleanup old Bronze snapshots
+# =============================================================================
+def cleanup_bronze_snapshots(**context) -> int:
+    """
+    Remove snapshot batches from bronze.raw_hardware_sales that are older
+    than 7 days relative to the pipeline run date.
+
+    Rows with _ingested_at < NOW() - INTERVAL '7 days' are deleted.
+    All batches within the 7-day window are retained — this includes
+    multiple snapshots per source file if the pipeline ran more than once
+    in that window.
+
+    Returns the number of rows deleted.
+    """
+    dag_id  = context["dag"].dag_id
+    task_id = context["task"].task_id
+    run_id  = context["run_id"]
+
+    hook = get_pg_hook("postgres_dwh")
+    sql  = """
+        DELETE FROM bronze.raw_hardware_sales
+        WHERE _ingested_at < NOW() - INTERVAL '7 days';
+    """
+    conn = hook.get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        deleted = cursor.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    write_log(dag_id, task_id, run_id, "bronze", "success", rows_processed=deleted)
+    logger.info("Bronze snapshot cleanup: %d rows older than 7 days deleted.", deleted)
+    return deleted
 
 
 # =============================================================================
@@ -538,18 +679,12 @@ def transform_silver(**context) -> int:
 
     write_log(dag_id, task_id, run_id, "silver", "started")
 
-    last_bronze_id = int(Variable.get(SILVER_ID_VAR, default_var=0))
-    rows_written   = run_bronze_to_silver(last_bronze_id=last_bronze_id, conn_id="postgres_dwh")
+    rows_written = run_bronze_to_silver(conn_id="postgres_dwh")
 
     if rows_written == 0:
         logger.info("No new bronze rows to promote — silver is up to date.")
         write_log(dag_id, task_id, run_id, "silver", "success", rows_processed=0)
         return 0
-
-    new_max_id = get_pg_hook("postgres_dwh").get_first(
-        "SELECT MAX(_bronze_id) FROM silver.clean_hardware_sales;"
-    )[0] or 0
-    Variable.set(SILVER_ID_VAR, str(int(new_max_id)))
 
     write_log(dag_id, task_id, run_id, "silver", "success", rows_processed=rows_written)
     return rows_written
@@ -923,15 +1058,15 @@ Every hour.
 
 ### Trigger modes
 
-| Run type | S3 has new files | No new files |
-|---|---|---|
-| **Scheduled (hourly)** | Load bronze, run full pipeline | Short-circuit: all downstream SKIPPED |
-| **Manual (Trigger DAG button)** | Load bronze, run full pipeline | Skip S3 load, run Silver + Gold anyway |
+| Run type | Behaviour |
+|---|---|
+| **Scheduled (hourly)** | Check CDC timestamp → load only new/updated S3 files → cleanup old snapshots → run full pipeline. Short-circuits if no new files. |
+| **Manual (Trigger DAG button)** | Bypass CDC timestamp → load **all** S3 files as a fresh snapshot → cleanup old snapshots → run full Silver + Gold. |
 
 **When to trigger manually:**
 After updating SQL transform logic (e.g. fixing a cleaning rule in
-`transform_bronze_to_silver.sql`), trigger manually to reprocess all
-existing Bronze data through Silver and Gold with the new logic.
+`transform_bronze_to_silver.sql`), trigger manually to reload all S3 files
+and reprocess through Silver and Gold with the new logic.
 No JSON config needed — just click **Trigger DAG ▶**.
 
 ### CDC
@@ -952,7 +1087,6 @@ Recipient in `ALERT_EMAIL` env var.
 - `s3_bucket_name`        — S3 bucket name
 - `s3_prefix`             — folder prefix
 - `pipeline_last_run_ts`  — CDC checkpoint (init: `2000-01-01T00:00:00+00:00`)
-- `silver_last_bronze_id` — Silver CDC checkpoint (init: `0`)
     """,
 ) as dag:
 
@@ -964,6 +1098,10 @@ Recipient in `ALERT_EMAIL` env var.
         task_id="extract_load_bronze",
         python_callable=extract_load_bronze,
         ignore_downstream_trigger_rules=True,  # skip ALL downstream, not just direct children
+    )
+    t_cleanup_bronze = PythonOperator(
+        task_id="cleanup_bronze_snapshots",
+        python_callable=cleanup_bronze_snapshots,
     )
     t_validate_bronze = PythonOperator(
         task_id="validate_bronze",
@@ -1011,6 +1149,7 @@ Recipient in `ALERT_EMAIL` env var.
     (
         t_checkpoint
         >> t_bronze
+        >> t_cleanup_bronze
         >> t_validate_bronze
         >> t_silver
         >> t_validate_silver

@@ -34,7 +34,8 @@ Amazon S3 (CSV files)
 ┌─────────────────────────────────────────────────┐
 │                  BRONZE LAYER                   │
 │  Raw, unmodified data. All columns TEXT.        │
-│  Retained for audit / trace-back purposes.      │
+│  Snapshot model: each load appends a new batch. │
+│  Old snapshots auto-pruned after each load.     │
 │  schema: bronze  table: raw_hardware_sales      │
 └─────────────────────────────────────────────────┘
         │  SQL: transform_bronze_to_silver.sql
@@ -194,7 +195,6 @@ Go to **Admin → Variables → "+" (Add)** and add all 4:
 | `s3_bucket_name` | `your-bucket-name` | Bucket name only, no `s3://` |
 | `s3_prefix` | `computer_hardware_sales/` | Folder path, with trailing slash |
 | `pipeline_last_run_ts` | `2000-01-01T00:00:00+00:00` | CDC timestamp checkpoint — set far in the past for initial full load |
-| `silver_last_bronze_id` | `0` | Silver CDC checkpoint, auto-updated by DAG |
 
 ### 7. Enable and trigger the DAG
 
@@ -290,7 +290,6 @@ Variables hold non-sensitive pipeline config (bucket name, CDC checkpoints).
    | `s3_bucket_name` | `your-bucket-name` | S3 bucket name, no `s3://` prefix |
    | `s3_prefix` | `computer_hardware_sales/` | Folder path inside bucket, trailing slash required |
    | `pipeline_last_run_ts` | `2000-01-01T00:00:00+00:00` | CDC timestamp checkpoint — keep far in the past for initial full load. The DAG updates this automatically after every successful run. |
-   | `silver_last_bronze_id` | `0` | Silver CDC checkpoint — the DAG updates this automatically after each run |
 
 ---
 
@@ -314,7 +313,7 @@ immediately after the previous one completes — no fixed time gaps between laye
 
 ```
 capture_checkpoint
-  → extract_load_bronze → validate_bronze
+  → extract_load_bronze → cleanup_bronze_snapshots → validate_bronze
       → transform_silver → validate_silver
           → [dim_date, dim_geography, dim_product, dim_customer]  (parallel)
               → build_fact_sales → validate_gold
@@ -327,9 +326,10 @@ the next hourly trigger fires, Airflow skips that trigger.
 | Task | What happens |
 |------|--------------|
 | `capture_checkpoint` | Records the pipeline **start** timestamp in XCom. Used as the new CDC checkpoint if the full pipeline succeeds. |
-| `extract_load_bronze` | **ShortCircuitOperator.** Checks S3 for files with `LastModified > pipeline_last_run_ts`. If none found, returns `False` → all downstream tasks are **skipped** (not failed), pipeline marked success. If files found, upserts into `bronze.raw_hardware_sales` and returns `True`. Supports `force_reprocess` mode — see below. |
+| `extract_load_bronze` | **ShortCircuitOperator.** Scheduled runs: checks S3 for files with `LastModified > pipeline_last_run_ts`; if none found, returns `False` → all downstream tasks **skipped**. Manual runs: bypasses CDC timestamp check and loads **all** S3 files as a fresh snapshot. |
+| `cleanup_bronze_snapshots` | Deletes all but the most recent `_ingested_at` batch per `_source_file`. Keeps the Bronze table bounded while preserving the latest complete snapshot for Silver reprocessing. |
 | `validate_bronze` | Checks table is non-empty, required columns present, NULL rate < 50% on `order_id`. Warns on soft issues, raises on hard blockers only. |
-| `transform_silver` | Calls `sqls/silver/transform_bronze_to_silver.sql` with CDC cursor `silver_last_bronze_id`. All cleaning logic (date parsing, type casting, normalisation, measure recalculation) is in the SQL file. |
+| `transform_silver` | Calls `sqls/silver/transform_bronze_to_silver.sql`. Processes only the latest snapshot per source file (`_ingested_at = MAX per _source_file`). All cleaning logic (date parsing, type casting, normalisation, measure recalculation) is in the SQL file. |
 | `validate_silver` | 13 SQL checks. See [Data Quality & Validation](#data-quality--validation). |
 | `build_dim_*` | 4 dimension tasks run in parallel. Each calls the corresponding `sqls/gold/transform_silver_to_dim_*.sql`. |
 | `build_fact_sales` | Calls `sqls/gold/transform_silver_to_fact_sales.sql` after all dims complete. Resolves all 5 surrogate keys via SQL JOINs. |
@@ -344,7 +344,7 @@ The pipeline uses `ShortCircuitOperator` for the `extract_load_bronze` task:
 
 ```
 S3 has new/updated files?
-    YES → load to bronze, run full pipeline
+    YES → load to bronze, cleanup old snapshots, run full pipeline
     NO  → short-circuit: all downstream tasks SKIPPED, pipeline marked success
 ```
 
@@ -356,15 +356,18 @@ every hourly run where the source file hasn't changed.
 Just click **Trigger DAG ▶** in the Airflow UI — no JSON config needed.
 
 The pipeline detects that it was triggered manually (`run_type = "manual"`) and
-skips the S3 check entirely, running Silver → Gold with all existing Bronze data.
+bypasses the CDC timestamp check, loading **all** S3 files as a fresh snapshot.
+`cleanup_bronze_snapshots` then removes the previous snapshot so Silver always
+reads the freshly loaded data.
 
 **When to use:** after updating any SQL transform file (e.g. fixing a cleaning rule
-in `transform_bronze_to_silver.sql`) to reprocess existing data with the new logic.
+in `transform_bronze_to_silver.sql`) to reload source data and reprocess through
+Silver and Gold with the new logic.
 
-| Run type | S3 has new files | No new files |
-|---|---|---|
-| **Scheduled (hourly)** | Load bronze → full pipeline | All downstream **SKIPPED** |
-| **Manual (Trigger DAG ▶)** | Load bronze → full pipeline | Skip S3 load → Silver + Gold run anyway |
+| Run type | Behaviour |
+|---|---|
+| **Scheduled (hourly)** | Check CDC timestamp → load only new/updated files → cleanup → full pipeline. Short-circuits if no new files. |
+| **Manual (Trigger DAG ▶)** | Bypass CDC timestamp → load **all** S3 files → cleanup old snapshots → full pipeline. |
 
 ---
 
@@ -514,14 +517,15 @@ When `extract_load_bronze` finds no new S3 files, it returns `False` via
 `ShortCircuitOperator`. All downstream tasks are skipped — the checkpoint is
 not advanced and no resource is wasted.
 
-**Force reprocess mode.**
-Trigger the DAG manually with `{"force_reprocess": true}` to bypass the S3 check
-and re-run Silver + Gold with existing Bronze data. Useful after updating SQL logic.
+**Manual trigger reloads all files.**
+Triggering manually bypasses the CDC timestamp check and loads every S3 file
+as a fresh snapshot. `cleanup_bronze_snapshots` removes the previous batch
+immediately after, so Silver always reads the latest complete snapshot.
 
 | Layer | Idempotency mechanism | CDC mechanism |
 |-------|-----------------------|---------------|
-| Bronze | `ON CONFLICT (order_id, _source_file) DO UPDATE` — re-loading the same file updates existing rows | S3 `LastModified > pipeline_last_run_ts` (timestamp); short-circuits if nothing new |
-| Silver | `ON CONFLICT (order_id) DO UPDATE` | `WHERE id > silver_last_bronze_id` |
+| Bronze | Snapshot model — each load appends a new batch; `cleanup_bronze_snapshots` removes old batches after each run, keeping only the latest snapshot per `_source_file` | S3 `LastModified > pipeline_last_run_ts` (timestamp); short-circuits if nothing new |
+| Silver | `ON CONFLICT (order_id) DO UPDATE` | `_ingested_at = MAX(_ingested_at) per _source_file` — always reads the latest Bronze snapshot |
 | Gold dims | `ON CONFLICT DO UPDATE` (Type 1) or SCD2 `UPDATE+INSERT` | Full silver table scan |
 | Gold fact | `ON CONFLICT (order_id) DO UPDATE` | Full silver table scan |
 
