@@ -215,10 +215,17 @@ WHERE
         FROM bronze.raw_hardware_sales b2
         WHERE b2._source_file = bronze.raw_hardware_sales._source_file
     )
-    -- Skip rows with NULL key columns (they cannot be merged downstream)
+    -- Skip rows with NULL or empty key columns
     AND TRIM(COALESCE(order_id,   '')) <> ''
     AND TRIM(COALESCE(customer_id,'')) <> ''
     AND TRIM(COALESCE(product_id, '')) <> ''
+    -- Skip rows with meaningless placeholder order_id values
+    AND UPPER(TRIM(order_id)) NOT IN (
+        'N/A', 'NA', 'NAH', 'NONE', 'NULL', 'NIL',
+        'N.A.', 'N.A', '-', '--', 'TBD', 'TBC', 'UNKNOWN', '?'
+    )
+    -- order_id must start with a letter or digit (not a pure punctuation/symbol string)
+    AND TRIM(order_id) ~ '^[A-Za-z0-9]'
 
 -- For duplicate order_ids in source, keep the row with the latest _ingested_at.
 -- DISTINCT ON requires ORDER BY to start with the same expression.
