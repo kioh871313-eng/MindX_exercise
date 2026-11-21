@@ -46,7 +46,7 @@ INSERT INTO silver.clean_hardware_sales (
     _loaded_at
 )
 
-SELECT
+SELECT DISTINCT ON (TRIM(order_id))
     -- -------------------------------------------------------
     -- Keys: trim whitespace, skip fully-NULL rows
     -- -------------------------------------------------------
@@ -219,6 +219,10 @@ WHERE
     AND TRIM(COALESCE(order_id,   '')) <> ''
     AND TRIM(COALESCE(customer_id,'')) <> ''
     AND TRIM(COALESCE(product_id, '')) <> ''
+
+-- For duplicate order_ids in source, keep the row with the latest _ingested_at.
+-- DISTINCT ON requires ORDER BY to start with the same expression.
+ORDER BY TRIM(order_id), _ingested_at DESC
 
 ON CONFLICT (order_id)
 DO UPDATE SET

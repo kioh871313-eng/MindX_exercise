@@ -38,19 +38,20 @@ def _load_sql(relative_path: str) -> str:
 
 
 def run_bronze_to_silver(
-    last_bronze_id: int,
     conn_id: str = "postgres_dwh",
 ) -> int:
     """
     Execute the Bronze → Silver transformation SQL.
 
-    Reads sqls/silver/transform_bronze_to_silver.sql, substitutes the
-    CDC parameter, and executes it.  Returns the number of rows upserted.
+    Reads sqls/silver/transform_bronze_to_silver.sql and executes it.
+    Returns the number of rows upserted.
+
+    The SQL filters bronze rows using the snapshot model — only the latest
+    _ingested_at batch per _source_file is processed. No runtime parameters
+    are required.
 
     Parameters
     ----------
-    last_bronze_id : int
-        Only bronze rows with id > last_bronze_id are processed (CDC).
     conn_id : str
         Airflow Postgres connection ID.
 
@@ -65,7 +66,7 @@ def run_bronze_to_silver(
     conn = hook.get_conn()
     try:
         cursor = conn.cursor()
-        cursor.execute(sql, {"last_bronze_id": last_bronze_id})
+        cursor.execute(sql)
         rows_affected = cursor.rowcount
         conn.commit()
     except Exception:
@@ -74,11 +75,7 @@ def run_bronze_to_silver(
     finally:
         conn.close()
 
-    logger.info(
-        "Bronze → Silver: %d rows upserted (bronze id > %d).",
-        rows_affected,
-        last_bronze_id,
-    )
+    logger.info("Bronze → Silver: %d rows upserted (snapshot model).", rows_affected)
     return rows_affected
 
 
