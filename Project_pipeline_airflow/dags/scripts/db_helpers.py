@@ -8,7 +8,7 @@ are never hardcoded — configure the connection in the Airflow UI:
   Conn Id  : postgres_dwh
   Conn Type: Postgres
   Host     : postgres-dwh   (Docker service name)
-  Port     : 5432
+  Port     : 5434
   Schema   : hardware_sales_dwh
 
 Functions

@@ -61,9 +61,9 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+import pytz
 
-TZ_VN = ZoneInfo("Asia/Ho_Chi_Minh")
+TZ_VN = pytz.timezone("Asia/Ho_Chi_Minh")
 from typing import List, Optional, Tuple
 
 import pandas as pd
