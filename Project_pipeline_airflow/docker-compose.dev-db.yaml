@@ -1,0 +1,48 @@
+version: '3.8'
+
+# =================================================================
+# docker-compose.dev-db.yaml — Local Development Database ONLY
+#
+# THIS FILE IS GIT-IGNORED. Do not commit it.
+#
+# Purpose: Spin up the postgres-dwh container on your local machine
+#          to simulate the Data Warehouse. In UAT/PROD this is
+#          replaced by a managed database (e.g. AWS RDS) — this
+#          file is irrelevant in those environments.
+#
+# Usage:
+#   Step 1 — Edit the credentials below (POSTGRES_USER / POSTGRES_PASSWORD)
+#   Step 2 — Start the DWH:
+#               docker compose -f docker-compose.dev-db.yaml up -d
+#   Step 3 — Start Airflow (separate terminal):
+#               docker compose up -d
+#   Step 4 — Add the postgres_dwh connection in Airflow UI.
+#             Use the same user/password you set below.
+#
+# Teardown (keeps data):   docker compose -f docker-compose.dev-db.yaml stop
+# Teardown (wipes data):   docker compose -f docker-compose.dev-db.yaml down -v
+# =================================================================
+
+services:
+  postgres-dwh:
+    image: postgres:15
+    container_name: postgres_dwh
+    environment:
+      POSTGRES_USER:     postgres      # <-- change this
+      POSTGRES_PASSWORD: input_database_password      # <-- change this
+      POSTGRES_DB:       hardware_sales_dwh
+    ports:
+      - "5434:5432"   # accessible on localhost:5434 from your host machine
+    volumes:
+      - postgres_dwh_data:/var/lib/postgresql/data
+      # Auto-creates all schemas and tables on first start
+      - ./sqls/00_init_schemas.sql:/docker-entrypoint-initdb.d/00_init_schemas.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]   # <-- match POSTGRES_USER
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+volumes:
+  postgres_dwh_data:

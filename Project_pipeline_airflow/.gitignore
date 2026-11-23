@@ -1,6 +1,6 @@
 
 # Local dev database — contains DWH credentials, never commit
-docker-compose.dev-db.yaml
+#docker-compose.dev-db.yaml
 
 # Certificates / keys
 *.pem
