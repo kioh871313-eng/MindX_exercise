@@ -1,5 +1,3 @@
-# Environment — contains AIRFLOW_UID only, still git-ignored by convention
-.env
 
 # Local dev database — contains DWH credentials, never commit
 docker-compose.dev-db.yaml
