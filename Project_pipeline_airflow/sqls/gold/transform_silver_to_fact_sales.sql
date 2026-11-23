@@ -66,7 +66,7 @@ SELECT
     s.total_cost,
     s.profit,
 
-    NOW()                                                AS _loaded_at
+    NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh'                AS _loaded_at
 
 FROM silver.clean_hardware_sales s
 

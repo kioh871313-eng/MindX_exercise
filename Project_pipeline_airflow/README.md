@@ -18,10 +18,11 @@ An end-to-end data pipeline built with **Apache Airflow**, **PostgreSQL**, and *
 8. [Data Quality & Validation](#data-quality--validation)
 9. [SCD2 Strategy](#scd2-strategy)
 10. [Logging & Audit](#logging--audit)
-11. [Idempotency & CDC](#idempotency--cdc)
-12. [Security Notes](#security-notes)
-13. [Generating Sample Source Data](#generating-sample-source-data)
-14. [Data Dictionary](#data-dictionary)
+11. [Email Alerts](#email-alerts)
+12. [Idempotency & CDC](#idempotency--cdc)
+13. [Security Notes](#security-notes)
+14. [Generating Sample Source Data](#generating-sample-source-data)
+15. [Data Dictionary](#data-dictionary)
 
 ---
 
@@ -136,12 +137,16 @@ Project_pipeline_airflow/
 cp .env.example .env
 ```
 
-`.env` contains only `AIRFLOW_UID` — no passwords, no keys.
+Fill in your values:
 
 ```bash
 # On Linux/Mac: replace 50000 with output of: echo $(id -u)
 # On Windows with Docker Desktop: leave as 50000
 AIRFLOW_UID=50000
+
+# Email address to receive pipeline alerts (warnings and failures).
+# Leave blank to disable. SMTP credentials go in Airflow UI, not here.
+ALERT_EMAIL=your_email@example.com
 ```
 
 ### 3. (Local dev only) Start the DWH database
@@ -188,7 +193,7 @@ See the [detailed connection guide below](#airflow-connections--variables) for e
 
 ### 6. Add Variables in Airflow UI
 
-Go to **Admin → Variables → "+" (Add)** and add all 4:
+Go to **Admin → Variables → "+" (Add)** and add all 3:
 
 | Key | Value | Note |
 |-----|-------|------|
@@ -327,7 +332,7 @@ the next hourly trigger fires, Airflow skips that trigger.
 |------|--------------|
 | `capture_checkpoint` | Records the pipeline **start** timestamp in XCom. Used as the new CDC checkpoint if the full pipeline succeeds. |
 | `extract_load_bronze` | **ShortCircuitOperator.** Scheduled runs: checks S3 for files with `LastModified > pipeline_last_run_ts`; if none found, returns `False` → all downstream tasks **skipped**. Manual runs: bypasses CDC timestamp check and loads **all** S3 files as a fresh snapshot. |
-| `cleanup_bronze_snapshots` | Deletes all but the most recent `_ingested_at` batch per `_source_file`. Keeps the Bronze table bounded while preserving the latest complete snapshot for Silver reprocessing. |
+| `cleanup_bronze_snapshots` | Deletes Bronze rows with `_ingested_at` older than 7 days. All batches within the 7-day window are retained — multiple snapshots per file are preserved if the pipeline ran more than once in that window. |
 | `validate_bronze` | Checks table is non-empty, required columns present, NULL rate < 50% on `order_id`. Warns on soft issues, raises on hard blockers only. |
 | `transform_silver` | Calls `sqls/silver/transform_bronze_to_silver.sql`. Processes only the latest snapshot per source file (`_ingested_at = MAX per _source_file`). All cleaning logic (date parsing, type casting, normalisation, measure recalculation) is in the SQL file. |
 | `validate_silver` | 13 SQL checks. See [Data Quality & Validation](#data-quality--validation). |
@@ -424,6 +429,11 @@ something landed and the structure is usable.
 | `ship_date >= order_date` |
 | Silver row count >= 60% of valid bronze row count |
 
+> **Source data filtering (applied before insert):** rows with meaningless `order_id`
+> values (`N/A`, `NA`, `Nah`, `None`, `Null`, `TBD`, `Unknown`, `-`, `?`, etc.) and
+> rows where `order_id` does not start with a letter or digit are dropped at the
+> Bronze → Silver transform step, not counted as Silver failures.
+
 ### Gold validation (`validate_gold` task) — strict, all raise
 
 | Check |
@@ -487,6 +497,54 @@ WHERE status = 'failed'
   AND logged_at >= NOW() - INTERVAL '7 days'
 ORDER BY logged_at DESC;
 ```
+
+---
+
+## Email Alerts
+
+The pipeline sends email notifications via SMTP for two categories of events:
+
+### Validation warnings and failures
+
+Each validation task (`validate_bronze`, `validate_silver`, `validate_gold`) sends
+one consolidated email at the end of its checks — not one per check.
+
+| Situation | Subject prefix | Pipeline continues? |
+|---|---|---|
+| Hard-fail check failed | `[FAILURE]` | No — task raises, pipeline stops |
+| Only soft checks failed | `[WARNING]` | Yes — pipeline continues |
+| All checks passed | No email sent | Yes |
+
+The email body lists each failed/warned check with its name, message, and value,
+followed by SQL queries to investigate in the DWH.
+
+### Task errors
+
+Any task that raises an unexpected exception (e.g. `extract_load_bronze`,
+`transform_silver`, `build_fact_sales`) triggers a separate `[ERROR]` email
+via Airflow's `on_failure_callback`. The body includes the task name, run ID,
+and the exception message.
+
+### Setup
+
+| What | Where |
+|---|---|
+| Recipient address | `ALERT_EMAIL` in `.env` |
+| SMTP host, login, password | Airflow Connection `smtp_default` (Admin → Connections) |
+
+**Create `smtp_default` connection:**
+
+| Field | Value |
+|---|---|
+| **Connection Id** | `smtp_default` |
+| **Connection Type** | `Generic` |
+| **Host** | `smtp.gmail.com` (or your SMTP host) |
+| **Login** | sender email address |
+| **Password** | app password (Gmail) or SMTP password |
+| **Port** | `587` |
+
+Leave `ALERT_EMAIL` blank in `.env` to disable all email alerts — the pipeline
+runs normally, failures are still visible in Airflow UI and `logs.pipeline_log`.
 
 ---
 

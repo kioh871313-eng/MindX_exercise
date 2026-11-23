@@ -61,6 +61,9 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+TZ_VN = ZoneInfo("Asia/Ho_Chi_Minh")
 from typing import List, Optional, Tuple
 
 import pandas as pd
@@ -451,14 +454,7 @@ def extract_load_bronze(**context) -> bool:
             logger.info("Manual load file: %s", s3_key)
             df = read_csv_from_s3(bucket=s3_bucket, key=s3_key, aws_conn_id="aws_default")
             df["_source_file"] = s3_key
-            df["_ingested_at"] = datetime.utcnow()
-            _insert_bronze(hook, df)
-            total_rows += len(df)
-            logger.info("Inserted %d rows from %s", len(df), s3_key)
-
-        write_log(dag_id, task_id, run_id, "bronze", "success", rows_processed=total_rows)
-        logger.info("Manual bronze load complete. Total rows inserted: %d", total_rows)
-        return True  # always proceed downstream on manual run
+            df["_ingested_at"] = datetime.now(tz=TZ_VN)
 
     # Scheduled run — check S3 for new files
     write_log(dag_id, task_id, run_id, "bronze", "started")
@@ -487,7 +483,7 @@ def extract_load_bronze(**context) -> bool:
         logger.info("Loading file: %s", s3_key)
         df = read_csv_from_s3(bucket=s3_bucket, key=s3_key, aws_conn_id="aws_default")
         df["_source_file"] = s3_key
-        df["_ingested_at"] = datetime.utcnow()
+        df["_ingested_at"] = datetime.now(tz=TZ_VN)
         _insert_bronze(hook, df)
         total_rows += len(df)
         logger.info("Inserted %d rows from %s", len(df), s3_key)
@@ -1075,6 +1071,7 @@ Checkpoint advances only on full success.
 
 ### Email alerts
 One email per validation task (not per check).
+Task errors (non-validation failures) also trigger an `[ERROR]` email via `on_failure_callback`.
 SMTP credentials in Airflow Connection `smtp_default`.
 Recipient in `ALERT_EMAIL` env var.
 

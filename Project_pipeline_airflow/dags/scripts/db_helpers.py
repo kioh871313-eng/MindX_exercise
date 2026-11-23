@@ -109,7 +109,7 @@ def write_log(
     sql = """
         INSERT INTO logs.pipeline_log
             (dag_id, task_id, run_id, layer, status, rows_processed, error_message, logged_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW());
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh');
     """
     hook = get_pg_hook(conn_id)
     hook.run(sql, parameters=(dag_id, task_id, run_id, layer, status, rows_processed, error_message))

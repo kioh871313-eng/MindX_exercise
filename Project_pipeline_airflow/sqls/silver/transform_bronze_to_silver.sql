@@ -204,7 +204,7 @@ SELECT DISTINCT ON (TRIM(order_id))
     -- -------------------------------------------------------
     _source_file,
     id                                                      AS _bronze_id,
-    NOW()                                                   AS _loaded_at
+    NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh'                  AS _loaded_at
 
 FROM bronze.raw_hardware_sales
 
